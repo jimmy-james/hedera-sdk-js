@@ -1,11 +1,5 @@
 /** common exports go in this module */
 
-export { BigNumber } from "bignumber.js";
-export {
-    BaseClient, ClientConfig, Signer, SigningOpts, PubKeyAndSigner, Operator,
-    PrivateKey, Nodes, Node
-} from "./BaseClient";
-
 export { AccountCreateTransaction } from "./account/AccountCreateTransaction";
 export { AccountUpdateTransaction } from "./account/AccountUpdateTransaction";
 export { AccountDeleteTransaction } from "./account/AccountDeleteTransaction";
@@ -42,23 +36,37 @@ export { GetBySolidityIdQuery } from "./GetBySolidityIdQuery";
 
 export { Transaction } from "./Transaction";
 
-export {
-    HederaError,
-    ValidationError, MaxPaymentExceededError, TinybarValueError,
-    ResponseCodeEnum, ResponseCode, getResponseCodeName
-} from "./errors";
+export { Status } from "./Status";
+export { Transfer } from "./Transfer";
+
+// Errors
+export { HederaStatusError } from "./errors/HederaStatusError";
+export { LocalValidationError } from "./errors/LocalValidationError";
+export { BadKeyError } from "./errors/BadKeyError";
+export { HbarRangeError } from "./errors/HbarRangeError";
+export { MaxQueryPaymentExceededError } from "./errors/MaxQueryPaymentExceededError";
+export { HederaPrecheckStatusError } from "./errors/HederaPrecheckStatusError";
+export { HederaReceiptStatusError } from "./errors/HederaReceiptStatusError";
+export { HederaRecordStatusError } from "./errors/HederaRecordStatusError";
+
+// Deprecated Errors
+export { ResponseCode, HederaError } from "./errors/HederaError";
+export { ValidationError } from "./errors/ValidationError";
+export { TinybarValueError } from "./errors/TinybarValueError";
+export { MaxPaymentExceededError } from "./errors/MaxPaymentExceededError";
 
 export { Ed25519PrivateKey } from "./crypto/Ed25519PrivateKey";
 export { Ed25519PublicKey } from "./crypto/Ed25519PublicKey";
 export { ThresholdKey } from "./crypto/ThresholdKey";
 export { PublicKey } from "./crypto/PublicKey";
 export { KeyList } from "./crypto/KeyList";
-export { MnemonicResult, generateMnemonic } from "./crypto/MnemonicResult";
+export { Mnemonic } from "./crypto/Mnemonic";
+export { MnemonicValidationResult } from "./crypto/MnemonicValidationResult";
+export { MnemonicValidationStatus } from "./crypto/MnemonicValidationStatus";
 export { KeyMismatchError } from "./crypto/KeyMismatchError";
 
-export * from "./Tinybar";
-
-export { Hbar, HbarUnit, hbarUnits, hbarUnitSymbols } from "./Hbar";
+export { Hbar } from "./Hbar";
+export { HbarUnit } from "./HbarUnit";
 
 export { AccountId } from "./account/AccountId";
 export { ContractId } from "./contract/ContractId";
@@ -69,3 +77,19 @@ export { TransactionReceipt } from "./TransactionReceipt";
 export { TransactionRecord } from "./TransactionRecord";
 
 export { ContractFunctionParams } from "./contract/ContractFunctionParams";
+export { Time } from "./Time";
+
+export { TransactionSigner } from "./BaseClient";
+
+// Consensus
+export { ConsensusTopicCreateTransaction } from "./consensus/ConsensusTopicCreateTransaction";
+export { ConsensusTopicDeleteTransaction } from "./consensus/ConsensusTopicDeleteTransaction";
+export { ConsensusTopicUpdateTransaction } from "./consensus/ConsensusTopicUpdateTransaction";
+export { ConsensusTopicInfoQuery } from "./consensus/ConsensusTopicInfoQuery";
+export { ConsensusTopicId } from "./consensus/ConsensusTopicId";
+export { ConsensusSubmitMessageTransaction } from "./consensus/ConsensusSubmitMessageTransaction";
+export { ConsensusMessageSubmitTransaction } from "./consensus/ConsensusMessageSubmitTransaction";
+
+// Mirror
+export { MirrorConsensusTopicResponse } from "./mirror/MirrorConsensusTopicResponse";
+export { MirrorSubscriptionHandle } from "./mirror/MirrorSubscriptionHandle";

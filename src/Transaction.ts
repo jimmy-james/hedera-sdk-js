@@ -1,6 +1,7 @@
+import * as nacl from "tweetnacl";
 import { Transaction as Transaction_ } from "./generated/Transaction_pb";
 import { TransactionBody } from "./generated/TransactionBody_pb";
-import { BaseClient, Signer } from "./BaseClient";
+import { BaseClient, TransactionSigner } from "./BaseClient";
 import { SignatureMap, SignaturePair, TransactionID } from "./generated/BasicTypes_pb";
 import { grpc } from "@improbable-eng/grpc-web";
 import { TransactionResponse } from "./generated/TransactionResponse_pb";
@@ -16,19 +17,24 @@ import { TransactionReceipt } from "./TransactionReceipt";
 import { Ed25519PublicKey } from "./crypto/Ed25519PublicKey";
 import { Ed25519PrivateKey } from "./crypto/Ed25519PrivateKey";
 import { TransactionRecord } from "./TransactionRecord";
-import { ResponseCodeEnum } from "./generated/ResponseCode_pb";
-import { throwIfExceptional } from "./errors";
+import { Status } from "./Status";
+import * as base64 from "@stablelib/base64";
 import UnaryMethodDefinition = grpc.UnaryMethodDefinition;
+import { HederaPrecheckStatusError } from "./errors/HederaPrecheckStatusError";
 
-/**
- * Signature/public key pairs are passed around as objects
- */
+/** signature/public key pairs are passed around as objects */
 export interface SignatureAndKey {
     signature: Uint8Array;
     publicKey: Ed25519PublicKey;
 }
 
 const receiptRetryDelayMs = 500;
+
+/** internal method to create a new transaction from its discrete parts */
+export const transactionCreate = Symbol("transactionCreate");
+
+/** execute the transaction directly and return the protobuf response */
+export const transactionCall = Symbol("transactionCall");
 
 export class Transaction {
     private readonly _node: AccountId;
@@ -37,24 +43,25 @@ export class Transaction {
     private readonly _validDurationSeconds: number;
     private readonly _method: UnaryMethodDefinition<Transaction_, TransactionResponse>;
 
-    /**
-     * NOT A STABLE API
-     *
-     * This constructor is not meant to be invoked from user code. It is only public for
-     * access from `TransactionBuilder.ts`. Usage may be broken in backwards-compatible
-     * version bumps.
-     */
-    public constructor(
+    private static [ transactionCreate ](
         node: AccountId,
         inner: Transaction_,
         body: TransactionBody,
         method: UnaryMethodDefinition<Transaction_, TransactionResponse>
-    ) {
-        this._node = node;
-        this._inner = inner;
-        this._txnId = orThrow(body.getTransactionid());
-        this._validDurationSeconds = orThrow(body.getTransactionvalidduration()).getSeconds();
-        this._method = method;
+    ): Transaction {
+        const tx = Object.create(this.prototype);
+
+        tx._node = node;
+        tx._inner = inner;
+        tx._txnId = orThrow(body.getTransactionid());
+        tx._validDurationSeconds = orThrow(body.getTransactionvalidduration()).getSeconds();
+        tx._method = method;
+
+        return tx;
+    }
+
+    private constructor() {
+        throw new Error("the constructor of Transaction is private; please construct through TransactionBuilder");
     }
 
     public static fromBytes(bytes: Uint8Array): Transaction {
@@ -65,7 +72,7 @@ export class Transaction {
 
         const method = methodFromTxn(body);
 
-        return new Transaction(nodeId, inner, body, method);
+        return Transaction[ transactionCreate ](nodeId, inner, body, method);
     }
 
     public get id(): TransactionId {
@@ -98,7 +105,7 @@ export class Transaction {
         this._checkPubKey(privateKey.publicKey);
 
         return this._addSignature({
-            signature: privateKey.sign(this._inner.getBodybytes_asU8()),
+            signature: nacl.sign(this._inner.getBodybytes_asU8(), privateKey._keyData),
             publicKey: privateKey.publicKey
         });
     }
@@ -110,7 +117,7 @@ export class Transaction {
      * @param publicKey the public key that can be used to verify the returned signature
      * @param signer
      */
-    public async signWith(publicKey: Ed25519PublicKey, signer: Signer): Promise<this> {
+    public async signWith(publicKey: Ed25519PublicKey, signer: TransactionSigner): Promise<this> {
         this._checkPubKey(publicKey);
 
         const signResult = signer(this._inner.getBodybytes_asU8());
@@ -122,7 +129,7 @@ export class Transaction {
         return this;
     }
 
-    public async execute(client: BaseClient): Promise<TransactionId> {
+    public async [ transactionCall ](client: BaseClient): Promise<TransactionResponse> {
         // If client is supplied make sure to sign transaction if we have not already
         if (client._getOperatorKey() && client._getOperatorSigner()) {
             await this.signWith(client._getOperatorKey()!, client._getOperatorSigner()!);
@@ -146,29 +153,40 @@ export class Transaction {
             }
 
             const response = await client._unaryCall(node.url, this._inner, this._method);
-            const status: number = response.getNodetransactionprecheckcode();
+            const status: Status = Status._fromCode(response.getNodetransactionprecheckcode());
 
             // If response code is BUSY we need to timeout and retry
-            if (ResponseCodeEnum.BUSY === status) {
+            if (status._isBusy()) {
                 continue;
             }
 
-            throwIfExceptional(status);
-
-            return this.id;
+            return response;
         }
         /* eslint-enable no-await-in-loop */
     }
 
+    public async execute(client: BaseClient): Promise<TransactionId> {
+        const response = await this[ transactionCall ](client);
+        const status: Status = Status._fromCode(response.getNodetransactionprecheckcode());
+
+        HederaPrecheckStatusError._throwIfError(status.code, this.id);
+
+        return this.id;
+    }
+
+    /** @deprecate `Transaction.getReceipt()` is deprecrated. Use `(await Transaction.execute()).getReceipt()` instead. */
     public getReceipt(client: BaseClient): Promise<TransactionReceipt> {
+        console.warn("`Transaction.getReceipt()` is deprecrated. Use `(await Transaction.execute()).getReceipt()` instead.");
         return this.id.getReceipt(client);
     }
 
+    /** @deprecate `Transaction.getRecord()` is deprecrated. Use `(await Transaction.execute()).getRecord()` instead. */
     public getRecord(client: BaseClient): Promise<TransactionRecord> {
+        console.warn("`Transaction.getRecord()` is deprecrated. Use `(await Transaction.execute()).getRecord()` instead.");
         return this.id.getRecord(client);
     }
 
-    public toProto(): Transaction_ {
+    public _toProto(): Transaction_ {
         return Message.cloneMessage(this._inner);
     }
 
@@ -177,10 +195,11 @@ export class Transaction {
     }
 
     public toString(): string {
-        const tx = this.toProto().toObject();
+        const tx = this._toProto().toObject();
         const bodybytes = tx.bodybytes instanceof Uint8Array ?
-            Buffer.from(tx.bodybytes) :
-            Buffer.from(tx.bodybytes, "base64");
+            tx.bodybytes :
+            base64.decode(tx.bodybytes);
+
         tx.body = TransactionBody.deserializeBinary(bodybytes).toObject();
 
         return JSON.stringify(tx, null, 4);

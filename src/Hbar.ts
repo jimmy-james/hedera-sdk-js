@@ -1,178 +1,238 @@
 import BigNumber from "bignumber.js";
+import { HbarRangeError } from "./errors/HbarRangeError";
+import { HbarUnit } from "./HbarUnit";
+import { UInt64Value } from "google-protobuf/google/protobuf/wrappers_pb";
 
-const hbarAsTinybar = new BigNumber(100_000_000);
+export type Tinybar = BigNumber.Value;
 
-/** Multipliers of tinybar to other denominations */
-export const tinybarConversions = {
-    tinybar: 1,
-    microbar: 100,
-    millibar: 100_000,
-    hbar: hbarAsTinybar,
-    kilobar: hbarAsTinybar.multipliedBy(1000),
-    megabar: hbarAsTinybar.multipliedBy(1_000_000),
-    gigabar: hbarAsTinybar.multipliedBy(1_000_000_000)
-};
+const hbarTinybar = Symbol("hbarTinybar");
+
+export const hbarToProto = Symbol("hbarToProto");
+
+export const hbarToProtoValue = Symbol("hbarToProtoValue");
+
+export const hbarCheck = Symbol("hbarCheck");
 
 function convertToTinybar(amount: BigNumber.Value, unit: HbarUnit): BigNumber {
-    const bnAmount = amount instanceof BigNumber ? amount : new BigNumber(amount);
-    return bnAmount.multipliedBy(tinybarConversions[ unit ]);
+    const bnAmount = BigNumber.isBigNumber(amount) ? amount : new BigNumber(amount);
+    return bnAmount.multipliedBy(unit._toTinybarCount());
 }
 
-export type HbarUnit = keyof typeof tinybarConversions;
+const maxTinybar = new BigNumber(2).pow(63).minus(1);
+const maxHbar = maxTinybar.dividedBy(HbarUnit.Hbar._toTinybarCount());
 
-/** The possible denominations of HBAR in order by magnitude */
-export const hbarUnits: HbarUnit[] = [ "tinybar", "microbar", "millibar", "hbar", "kilobar", "megabar", "gigabar" ];
-
-/** Symbols for denominations of HBAR for use in UIs */
-export const hbarUnitSymbols = {
-    tinybar: "tℏ",
-    microbar: "μℏ",
-    millibar: "mℏ",
-    hbar: "ℏ",
-    kilobar: "kℏ",
-    megabar: "Mℏ",
-    gigabar: "Gℏ"
-};
+const minTinybar = new BigNumber(-2).pow(63);
+const minHbar = minTinybar.dividedBy(HbarUnit.Hbar._toTinybarCount());
 
 /**
  * Typesafe wrapper for values of HBAR providing foolproof conversions to other denominations.
  */
 export class Hbar {
     /** The HBAR value in tinybar, used natively by the SDK and Hedera itself */
-    private readonly _tinybar: BigNumber;
+    private [hbarTinybar]: BigNumber;
 
-    private constructor(tinybar: BigNumber) {
-        this._tinybar = tinybar;
+    public constructor(amount: BigNumber.Value) {
+        const bnAmount = amount instanceof BigNumber ? amount : new BigNumber(amount);
+
+        if (bnAmount.isZero()) {
+            this[ hbarTinybar ] = bnAmount;
+        } else {
+            this[ hbarTinybar ] = bnAmount.multipliedBy(HbarUnit.Hbar._toTinybarCount());
+            this[ hbarCheck ]({ allowNegative: true });
+        }
+
+        // See `Hbar.fromTinybar()` as to why this is done
+        if (typeof amount === "number" && amount >= 2 ** 53) {
+            throw new HbarRangeError(this);
+        }
     }
 
-    public static readonly MAX_VALUE: Hbar = new Hbar(new BigNumber(2).pow(63).minus(1));
+    public static readonly MAX: Hbar = new Hbar(maxHbar);
 
-    public static readonly MIN_VALUE: Hbar = new Hbar(new BigNumber(-2).pow(63));
+    public static readonly MIN: Hbar = new Hbar(minHbar);
 
-    public static readonly ZERO: Hbar = Hbar.zero();
+    public static readonly ZERO: Hbar = new Hbar(0);
 
     /**
      * Calculate the HBAR amount given a raw value and a unit.
      */
-    public static from(amount: number | BigNumber | string, unit: HbarUnit): Hbar {
-        return new Hbar(convertToTinybar(amount, unit));
+    public static from(amount: BigNumber.Value, unit: HbarUnit): Hbar {
+        const bnAmount = new BigNumber(amount);
+        const hbar = new Hbar(0);
+        hbar[ hbarTinybar ] = bnAmount.multipliedBy(unit._toTinybarCount());
+        return hbar;
     }
 
     /** Get HBAR from a tinybar amount, may be a string */
-    public static fromTinybar(amount: number | BigNumber | string): Hbar {
-        const bnAmount = amount instanceof BigNumber ? amount : new BigNumber(amount);
-        return new Hbar(bnAmount);
+    public static fromTinybar(amount: Tinybar): Hbar {
+        const bnAmount = new BigNumber(amount);
+        const hbar = new Hbar(0);
+        hbar[ hbarTinybar ] = bnAmount;
+
+        // Check if amount is out of range after hbar is constructed
+        // Technically we're able to successfully construct Hbar from 2 ** 53,
+        // but at that point the number is out of range for a js `number` type
+        // so we throw an error to indicate this. If someone wants to use values
+        // 2 ** 53 and higher then they shhould wrap the number in BigNumber.
+        if (typeof amount === "number" && amount >= 2 ** 53) {
+            throw new HbarRangeError(hbar);
+        }
+
+        return hbar;
     }
 
     /**
      * Wrap a raw value of HBAR, may be a string.
+     * @deprecate Use constructor instead. `new Hbar(amount)`
      */
-    public static of(amount: number | BigNumber | string): Hbar {
-        return new Hbar(convertToTinybar(amount, "hbar"));
+    public static of(amount: BigNumber.Value): Hbar {
+        console.warn("`Hbar.of` is deprecated. Use `new Hbar(amount)` instead.");
+        return new Hbar(amount);
     }
 
-    /** Create an Hbar with a value of 0 tinybar; Note that this is a positive signed zero */
+    // Create an Hbar with a value of 0 tinybar; Note that this is a positive signed zero
+    //
+    // @deprecate `Hbar.zero() is deprecated. If you want to use `Hbar.zero()` for
+    // comparisions then use `Hbar.ZERO` static field, otherwise use `new Hbar(0)`.
     public static zero(): Hbar {
+        console.warn(`\`Hbar.zero()\` is deprecated. If you want to use \`Hbar.zero()\` for 
+comparisions then use \`Hbar.ZERO\` static field, otherwise use \`new Hbar(0)\``);
         return new Hbar(new BigNumber(0));
     }
 
+    public toString(): string {
+        return this.value().toString();
+    }
+
     public value(): BigNumber {
-        return this.as("hbar");
+        return this.as(HbarUnit.Hbar);
     }
 
     public asTinybar(): BigNumber {
-        return this.as("tinybar");
+        return this.as(HbarUnit.Tinybar);
     }
 
     public as(unit: HbarUnit): BigNumber {
-        if (unit === "tinybar") {
-            return this._tinybar;
+        if (unit.toString() === HbarUnit.Tinybar.toString()) {
+            return this[ hbarTinybar ];
         }
 
-        return this._tinybar.dividedBy(tinybarConversions[ unit ]);
+        return this[ hbarTinybar ].dividedBy(unit._toTinybarCount());
     }
 
-    public multipliedBy(amount: number | BigNumber): Hbar {
-        return new Hbar(this._tinybar.multipliedBy(amount));
+    public multipliedBy(amount: BigNumber.Value): Hbar {
+        return new Hbar(this[ hbarTinybar ].multipliedBy(amount)
+            .dividedBy(HbarUnit.Hbar._toTinybarCount()));
     }
 
     public plus(hbar: Hbar): Hbar;
-    public plus(amount: number | BigNumber, unit: HbarUnit): Hbar;
-    public plus(amount: Hbar | number | BigNumber, unit?: HbarUnit): Hbar {
-        return amount instanceof Hbar ?
-            new Hbar(this._tinybar.plus(amount._tinybar)) :
-            new Hbar(this._tinybar.plus(convertToTinybar(amount, unit!)));
+    public plus(amount: BigNumber.Value, unit: HbarUnit): Hbar;
+    public plus(amount: Hbar | BigNumber.Value, unit?: HbarUnit): Hbar {
+        return new Hbar((amount instanceof Hbar ?
+            this[ hbarTinybar ].plus(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].plus(convertToTinybar(amount, unit!))
+        ).dividedBy(HbarUnit.Hbar._toTinybarCount()));
     }
 
     public minus(hbar: Hbar): Hbar;
-    public minus(amount: number | BigNumber, unit: HbarUnit): Hbar;
-    public minus(amount: Hbar | number | BigNumber, unit?: HbarUnit): Hbar {
-        return amount instanceof Hbar ?
-            new Hbar(this._tinybar.minus(amount._tinybar)) :
-            new Hbar(this._tinybar.minus(convertToTinybar(amount, unit!)));
+    public minus(amount: BigNumber.Value, unit: HbarUnit): Hbar;
+    public minus(amount: Hbar | BigNumber.Value, unit?: HbarUnit): Hbar {
+        return new Hbar((amount instanceof Hbar ?
+            this[ hbarTinybar ].minus(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].minus(convertToTinybar(amount, unit!))
+        ).dividedBy(HbarUnit.Hbar._toTinybarCount()));
     }
 
     public isEqualTo(hbar: Hbar): boolean;
-    public isEqualTo(amount: number | BigNumber, unit: HbarUnit): boolean;
-    public isEqualTo(amount: Hbar | number | BigNumber, unit?: HbarUnit): boolean {
+    public isEqualTo(amount: BigNumber.Value, unit: HbarUnit): boolean;
+    public isEqualTo(amount: Hbar | BigNumber.Value, unit?: HbarUnit): boolean {
         return amount instanceof Hbar ?
-            this._tinybar.isEqualTo(amount._tinybar) :
-            this._tinybar.isEqualTo(convertToTinybar(amount, unit!));
+            this[ hbarTinybar ].isEqualTo(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].isEqualTo(convertToTinybar(amount, unit!));
     }
 
     public isGreaterThan(hbar: Hbar): boolean;
-    public isGreaterThan(amount: number | BigNumber, unit: HbarUnit): boolean;
-    public isGreaterThan(amount: Hbar | number | BigNumber, unit?: HbarUnit): boolean {
+    public isGreaterThan(amount: BigNumber.Value, unit: HbarUnit): boolean;
+    public isGreaterThan(amount: Hbar | BigNumber.Value, unit?: HbarUnit): boolean {
         return amount instanceof Hbar ?
-            this._tinybar.isGreaterThan(amount._tinybar) :
-            this._tinybar.isGreaterThan(convertToTinybar(amount, unit!));
+            this[ hbarTinybar ].isGreaterThan(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].isGreaterThan(convertToTinybar(amount, unit!));
     }
 
     public isGreaterThanOrEqualTo(hbar: Hbar): boolean;
-    public isGreaterThanOrEqualTo(amount: number | BigNumber, unit: HbarUnit): boolean;
-    public isGreaterThanOrEqualTo(amount: Hbar | number | BigNumber, unit?: HbarUnit): boolean {
+    public isGreaterThanOrEqualTo(amount: BigNumber.Value, unit: HbarUnit): boolean;
+    public isGreaterThanOrEqualTo(amount: Hbar | BigNumber.Value, unit?: HbarUnit): boolean {
         return amount instanceof Hbar ?
-            this._tinybar.isGreaterThanOrEqualTo(amount._tinybar) :
-            this._tinybar.isGreaterThanOrEqualTo(convertToTinybar(amount, unit!));
+            this[ hbarTinybar ].isGreaterThanOrEqualTo(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].isGreaterThanOrEqualTo(convertToTinybar(amount, unit!));
     }
 
     public isLessThan(hbar: Hbar): boolean;
-    public isLessThan(amount: number | BigNumber, unit: HbarUnit): boolean;
-    public isLessThan(amount: Hbar | number | BigNumber, unit?: HbarUnit): boolean {
+    public isLessThan(amount: BigNumber.Value, unit: HbarUnit): boolean;
+    public isLessThan(amount: Hbar | BigNumber.Value, unit?: HbarUnit): boolean {
         return amount instanceof Hbar ?
-            this._tinybar.isLessThan(amount._tinybar) :
-            this._tinybar.isLessThan(convertToTinybar(amount, unit!));
+            this[ hbarTinybar ].isLessThan(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].isLessThan(convertToTinybar(amount, unit!));
     }
 
     public isLessThanOrEqualTo(hbar: Hbar): boolean;
-    public isLessThanOrEqualTo(amount: number | BigNumber, unit: HbarUnit): boolean;
-    public isLessThanOrEqualTo(amount: Hbar | number | BigNumber, unit?: HbarUnit): boolean {
+    public isLessThanOrEqualTo(amount: BigNumber.Value, unit: HbarUnit): boolean;
+    public isLessThanOrEqualTo(amount: Hbar | BigNumber.Value, unit?: HbarUnit): boolean {
         return amount instanceof Hbar ?
-            this._tinybar.isLessThanOrEqualTo(amount._tinybar) :
-            this._tinybar.isLessThanOrEqualTo(convertToTinybar(amount, unit!));
+            this[ hbarTinybar ].isLessThanOrEqualTo(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].isLessThanOrEqualTo(convertToTinybar(amount, unit!));
     }
 
     public comparedTo(hbar: Hbar): number;
-    public comparedTo(amount: number | BigNumber, unit: HbarUnit): number;
-    public comparedTo(amount: Hbar | number | BigNumber, unit?: HbarUnit): number {
+    public comparedTo(amount: BigNumber.Value, unit: HbarUnit): number;
+    public comparedTo(amount: Hbar | BigNumber.Value, unit?: HbarUnit): number {
         return amount instanceof Hbar ?
-            this._tinybar.comparedTo(amount._tinybar) :
-            this._tinybar.comparedTo(convertToTinybar(amount, unit!));
+            this[ hbarTinybar ].comparedTo(amount[ hbarTinybar ]) :
+            this[ hbarTinybar ].comparedTo(convertToTinybar(amount, unit!));
     }
 
     public isZero(): boolean {
-        return this._tinybar.isZero();
+        return this[ hbarTinybar ].isZero();
     }
 
     public negated(): Hbar {
-        return new Hbar(this._tinybar.negated());
+        return Hbar.fromTinybar(this[ hbarTinybar ].negated());
     }
 
     public isNegative(): boolean {
-        return this._tinybar.isNegative();
+        return this[ hbarTinybar ].isNegative();
     }
 
     public isPositive(): boolean {
-        return this._tinybar.isPositive();
+        return this[ hbarTinybar ].isPositive();
     }
+
+    public [ hbarCheck ]({ allowNegative }: { allowNegative: boolean }): void {
+        const tinybar = this[ hbarTinybar ];
+        if (tinybar.isNegative() && !allowNegative && tinybar.isLessThan(maxTinybar)) {
+            throw new HbarRangeError(this);
+        }
+
+        if (tinybar.isGreaterThan(maxTinybar)) {
+            throw new HbarRangeError(this);
+        }
+    }
+
+    public [ hbarToProto ](): string {
+        return String(this[ hbarTinybar ]);
+    }
+
+    public [ hbarToProtoValue ](): UInt64Value {
+        const value = new UInt64Value();
+        value.setValue(this[ hbarTinybar ].toNumber());
+        return value;
+    }
+}
+
+export function hbarFromTinybarOrHbar(number: Hbar | Tinybar): Hbar {
+    if (number instanceof Hbar) {
+        return number;
+    }
+
+    return Hbar.fromTinybar(new BigNumber(number));
 }

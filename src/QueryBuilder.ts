@@ -4,20 +4,16 @@ import { BaseClient, Node } from "./BaseClient";
 import { QueryHeader, ResponseType } from "./generated/QueryHeader_pb";
 import { Query } from "./generated/Query_pb";
 import { Response } from "./generated/Response_pb";
-import {
-    HederaError,
-    MaxPaymentExceededError,
-    ResponseCodeEnum,
-    throwIfExceptional,
-    ResponseCode
-} from "./errors";
+import { HederaStatusError } from "./errors/HederaStatusError";
+import { MaxQueryPaymentExceededError } from "./errors/MaxQueryPaymentExceededError";
 import { runValidation, setTimeoutAwaitable, timeoutPromise } from "./util";
 import { grpc } from "@improbable-eng/grpc-web";
-import { Tinybar } from "./Tinybar";
-import { Hbar } from "./Hbar";
+import { Hbar, Tinybar, hbarFromTinybarOrHbar, hbarCheck } from "./Hbar";
 import { ResponseHeader } from "./generated/ResponseHeader_pb";
 import { TransactionBody } from "./generated/TransactionBody_pb";
 import { AccountId } from "./account/AccountId";
+import { Status } from "./Status";
+import { HederaPrecheckStatusError } from "./errors/HederaPrecheckStatusError";
 
 export abstract class QueryBuilder<T> {
     protected readonly _inner: Query = new Query();
@@ -26,21 +22,24 @@ export abstract class QueryBuilder<T> {
 
     private _paymentAmount: Hbar | null = null;
 
+    private _transactionId: import("./TransactionId").TransactionId | null = null;
+
     protected constructor() {
     }
 
-    public setMaxQueryPayment(amount: Hbar | Tinybar): this {
-        this._maxPaymentAmount = amount instanceof Hbar ?
-            amount :
-            Hbar.fromTinybar(amount);
+    public setMaxQueryPayment(amount: Tinybar | Hbar): this {
+        const hbar = hbarFromTinybarOrHbar(amount);
+        hbar[ hbarCheck ]({ allowNegative: false });
 
+        this._maxPaymentAmount = hbar;
         return this;
     }
 
-    public setQueryPayment(amount: Hbar | Tinybar): this {
-        this._paymentAmount = amount instanceof Hbar ?
-            amount :
-            Hbar.fromTinybar(amount);
+    public setQueryPayment(amount: Tinybar | Hbar): this {
+        const hbar = hbarFromTinybarOrHbar(amount);
+        hbar[ hbarCheck ]({ allowNegative: false });
+
+        this._paymentAmount = hbar;
 
         return this;
     }
@@ -50,7 +49,8 @@ export abstract class QueryBuilder<T> {
      * `CryptoTransferTransaction` as the query payment.
      */
     public setQueryPaymentTransaction(transaction: import("./Transaction").Transaction): this {
-        this._getHeader().setPayment(transaction.toProto());
+        this._transactionId = transaction.id;
+        this._getHeader().setPayment(transaction._toProto());
 
         return this;
     }
@@ -78,17 +78,25 @@ export abstract class QueryBuilder<T> {
 
             // COST_ANSWER requires a "null" payment but does not actually
             // process it
-            queryHeader.setPayment((await new CryptoTransferTransaction()
+            const transaction = new CryptoTransferTransaction()
                 .addRecipient(node.id, 0)
-                .addSender(client._getOperator()!.account, 0)
-                .build(client)
+                .addSender(client._getOperatorAccountId()!, 0)
+                .build(client);
+
+            this._transactionId = transaction.id;
+
+            queryHeader.setPayment((await transaction
                 .signWith(client._getOperatorKey()!, client._getOperatorSigner()!))
-                .toProto());
+                ._toProto());
 
             const resp = await client._unaryCall(node.url, this._inner.clone(), this._getMethod());
 
             const respHeader = this._mapResponseHeader(resp);
-            throwIfExceptional(respHeader.getNodetransactionprecheckcode());
+
+            HederaPrecheckStatusError._throwIfError(
+                respHeader.getNodetransactionprecheckcode(),
+                this._transactionId
+            );
 
             return Hbar.fromTinybar(respHeader.getCost());
         } finally {
@@ -100,7 +108,7 @@ export abstract class QueryBuilder<T> {
     }
 
     public execute(client: BaseClient): Promise<T> {
-        let respStatus: ResponseCode | null = null;
+        let respStatus: Status | null = null;
 
         return timeoutPromise(this._getDefaultExecuteTimeout(), (async() => {
             let node: Node;
@@ -117,17 +125,17 @@ export abstract class QueryBuilder<T> {
                     node = client._randomNode();
 
                     await this._generatePaymentTransaction(client, node, this._paymentAmount);
-                } else if (this._maxPaymentAmount != null || client.maxQueryPayment != null) {
+                } else if (this._maxPaymentAmount != null || client._maxQueryPayment != null) {
                     node = client._randomNode();
 
                     const maxPaymentAmount: Hbar = this._maxPaymentAmount == null ?
-                        client.maxQueryPayment! :
+                        client._maxQueryPayment! :
                         this._maxPaymentAmount;
 
                     const actualCost = await this.getCost(client);
 
                     if (actualCost.isGreaterThan(maxPaymentAmount)) {
-                        throw new MaxPaymentExceededError(actualCost, maxPaymentAmount);
+                        throw new MaxQueryPaymentExceededError(actualCost, maxPaymentAmount);
                     }
 
                     await this._generatePaymentTransaction(client, node, actualCost);
@@ -147,13 +155,17 @@ export abstract class QueryBuilder<T> {
                 }
 
                 const resp = await client._unaryCall(node!.url, this._inner, this._getMethod());
-                respStatus = this._mapResponseHeader(resp).getNodetransactionprecheckcode();
+                respStatus = Status._fromCode(this._mapResponseHeader(resp)
+                    .getNodetransactionprecheckcode());
 
                 if (this._shouldRetry(respStatus, resp)) {
                     continue;
                 }
 
-                throwIfExceptional(respStatus, true);
+                HederaPrecheckStatusError._throwIfError(
+                    respStatus.code,
+                    this._transactionId!
+                );
 
                 return this._mapResponse(resp);
             }
@@ -163,7 +175,7 @@ export abstract class QueryBuilder<T> {
                 reject(new Error("timed out"));
             } else {
                 // We executed at least once
-                reject(new HederaError(respStatus));
+                reject(new HederaStatusError(respStatus));
             }
         });
     }
@@ -183,13 +195,13 @@ export abstract class QueryBuilder<T> {
     protected abstract _doLocalValidate(errors: string[]): void;
 
     /* eslint-disable-next-line @typescript-eslint/no-unused-vars */
-    protected _shouldRetry(status: ResponseCode, response: Response): boolean {
+    protected _shouldRetry(status: Status, response: Response): boolean {
         // By deafult, ONLY the BUSY status should be retriesd
-        return status === ResponseCodeEnum.BUSY;
+        return status.code === Status.Busy.code;
     }
 
     protected _getDefaultExecuteTimeout(): number {
-        return 10000; // 10s
+        return 20000; // 20s
     }
 
     protected _isPaymentRequired(): boolean {
@@ -212,14 +224,17 @@ export abstract class QueryBuilder<T> {
         node: Node,
         amount: Tinybar | Hbar
     ): Promise<this> {
+        const hbar = hbarFromTinybarOrHbar(amount);
+        hbar[ hbarCheck ]({ allowNegative: false });
+
         // HACK: Async import because otherwise there would a cycle in the imports which breaks everything
         const { CryptoTransferTransaction } = await import("./account/CryptoTransferTransaction");
 
         const paymentTx = await new CryptoTransferTransaction()
             .setNodeAccountId(node.id)
-            .addRecipient(node.id, amount)
-            .addSender(client._getOperator()!.account, amount)
-            .setMaxTransactionFee(Hbar.of(1))
+            .addRecipient(node.id, hbar)
+            .addSender(client._getOperatorAccountId()!, hbar)
+            .setMaxTransactionFee(new Hbar(1))
             .build(client)
             .signWith(client._getOperatorKey()!, client._getOperatorSigner()!);
 

@@ -4,16 +4,18 @@ import {
     newDuration,
     runValidation
 } from "./util";
-import { Transaction } from "./Transaction";
+import { Transaction, transactionCreate, transactionCall } from "./Transaction";
 import { Transaction as Transaction_ } from "./generated/Transaction_pb";
 import { grpc } from "@improbable-eng/grpc-web";
 import { TransactionResponse } from "./generated/TransactionResponse_pb";
 
-import { Tinybar, tinybarToString } from "./Tinybar";
-import { Hbar } from "./Hbar";
+import { Hbar, Tinybar, hbarFromTinybarOrHbar, hbarCheck, hbarToProto } from "./Hbar";
 import UnaryMethodDefinition = grpc.UnaryMethodDefinition;
 import { AccountId, AccountIdLike } from "./account/AccountId";
 import { TransactionId, TransactionIdLike } from "./TransactionId";
+import { Status } from "./Status";
+import { HederaPrecheckStatusError } from "./errors/HederaPrecheckStatusError";
+import BigNumber from "bignumber.js";
 
 /**
  * Max duration of transactions on the network is 2 minutes
@@ -22,6 +24,7 @@ const maxValidDuration = 120;
 
 export abstract class TransactionBuilder {
     protected readonly _inner: TransactionBody;
+    private _shouldSetFee = true;
 
     private _node?: AccountId;
 
@@ -42,7 +45,11 @@ export abstract class TransactionBuilder {
     }
 
     public setMaxTransactionFee(fee: Tinybar | Hbar): this {
-        this._inner.setTransactionfee(tinybarToString(fee));
+        const hbar = hbarFromTinybarOrHbar(fee);
+        // const hbar = typeof fee === "number" ? Hbar.fromTinybar(fee) : fee as Hbar;
+        hbar[ hbarCheck ]({ allowNegative: false });
+
+        this._inner.setTransactionfee(hbar[ hbarToProto ]());
         return this;
     }
 
@@ -52,7 +59,7 @@ export abstract class TransactionBuilder {
         return this;
     }
 
-    public setMemo(memo: string): this {
+    public setTransactionMemo(memo: string): this {
         this._inner.setMemo(memo);
         return this;
     }
@@ -81,17 +88,59 @@ export abstract class TransactionBuilder {
         });
     }
 
-    public build(client?: BaseClient): Transaction {
-        // Don't override TransactionFee if it's already set
+    public async getCost(client: BaseClient): Promise<Hbar> {
+        const originalFee = this._inner.getTransactionfee();
 
-        if (client && this._inner.getTransactionfee() === "0") {
-            this._inner.setTransactionfee(tinybarToString(client.maxTransactionFee));
+        try {
+            // We get the cost by trying to run the transaction with a zero fee
+            this._inner.setTransactionfee("0");
+            this._shouldSetFee = false;
+
+            const tx = this.build(client);
+
+            const response = await tx[ transactionCall ](client);
+            const status: Status = Status._fromCode(response.getNodetransactionprecheckcode());
+
+            if (status === Status.InsufficientTxFee) {
+                // NOTE: The actual cost returned by Hedera is within 99.8% to 99.9% of the actual
+                //       fee that will be assessed. We're unsure if this is because the fee fluctuates that
+                //       much or if the calculations are simply incorrect on the server. To compensate for
+                //       this we just bump by a 1% the value returned. As this would only ever be
+                //       a maximum this will not cause you to be charged more.
+
+                let estimatedFee = new BigNumber(response.getCost());
+                estimatedFee = estimatedFee.multipliedBy(1.01).decimalPlaces(0);
+
+                return Hbar.fromTinybar(estimatedFee);
+            }
+
+            HederaPrecheckStatusError._throwIfError(status.code, tx.id);
+        } finally {
+            // Reset the contained transaction body
+            this._shouldSetFee = true;
+            this._inner.setTransactionfee(originalFee);
+            this._inner.clearTransactionid();
+            this._inner.clearTransactionvalidduration();
+
+            // NOTE: The Node ID is explicitly not cleared as we want to use the same node to execute
+            //       as we just used to ask for the cost
+            // this._inner.clearNodeaccountid();
+        }
+
+        // Cost of the transaction was 0?
+        return new Hbar(0);
+    }
+
+    public build(client?: BaseClient): Transaction {
+        if (client && this._shouldSetFee && this._inner.getTransactionfee() === "0") {
+            // Don't override TransactionFee if it's already set
+            this._inner.setTransactionfee(client._maxTransactionFee[ hbarToProto ]());
         }
 
         if (client && !this._inner.hasTransactionid()) {
-            if (client._getOperator()) {
-                this._inner
-                    .setTransactionid(new TransactionId(client._getOperator()!.account)._toProto());
+            if (client._getOperatorAccountId()) {
+                const tx = new TransactionId(client._getOperatorAccountId()!);
+                this._inner.setTransactionid(tx._toProto());
             }
         }
 
@@ -117,7 +166,7 @@ export abstract class TransactionBuilder {
         const protoTx = new Transaction_();
         protoTx.setBodybytes(this._inner.serializeBinary());
 
-        return new Transaction(this._node, protoTx, this._inner, this._method);
+        return Transaction[ transactionCreate ](this._node, protoTx, this._inner, this._method);
     }
 
     public execute(client: BaseClient): Promise<TransactionId> {

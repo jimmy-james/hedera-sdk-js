@@ -5,12 +5,16 @@ import { Response } from "../generated/Response_pb";
 import { CryptoService } from "../generated/CryptoService_pb_service";
 import { QueryHeader } from "../generated/QueryHeader_pb";
 import { AccountId, AccountIdLike } from "./AccountId";
-import { AccountAmount } from "./AccountAmount";
+import { Transfer } from "../Transfer";
 import { CryptoGetStakersQuery } from "../generated/CryptoGetStakers_pb";
 import { ResponseHeader } from "../generated/ResponseHeader_pb";
 import { Hbar } from "../Hbar";
 
-export class AccountStakersQuery extends QueryBuilder<AccountAmount[]> {
+/**
+ * Get all the accounts that are proxy staking to this account. For each of them, give the amount
+ * currently staked. This is not yet implemented, but will be in a future version of the API.
+ */
+export class AccountStakersQuery extends QueryBuilder<Transfer[]> {
     private readonly _builder: CryptoGetStakersQuery;
 
     public constructor() {
@@ -22,6 +26,9 @@ export class AccountStakersQuery extends QueryBuilder<AccountAmount[]> {
         this._inner.setCryptogetproxystakers(this._builder);
     }
 
+    /**
+     * The Account ID that is being proxy staked to.
+     */
     public setAccountId(accountId: AccountIdLike): this {
         this._builder.setAccountid(new AccountId(accountId)._toProto());
         return this;
@@ -45,12 +52,12 @@ export class AccountStakersQuery extends QueryBuilder<AccountAmount[]> {
         return response.getCryptogetproxystakers()!.getHeader()!;
     }
 
-    protected _mapResponse(response: Response): AccountAmount[] {
+    protected _mapResponse(response: Response): Transfer[] {
         const allStakers = response.getCryptogetproxystakers()!;
 
-        return allStakers.getStakers()!.getProxystakerList().map((staker) => ({
-            accountId: AccountId._fromProto(staker.getAccountid()!),
-            amount: Hbar.fromTinybar(staker.getAmount())
+        return allStakers.getStakers()!.getProxystakerList().map((proto) => ({
+            accountId: AccountId._fromProto(proto.getAccountid()!),
+            amount: Hbar.fromTinybar(proto.getAmount())
         }));
     }
 }

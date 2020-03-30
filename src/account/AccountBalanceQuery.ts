@@ -9,6 +9,10 @@ import { AccountId, AccountIdLike } from "./AccountId";
 import { CryptoGetAccountBalanceQuery } from "../generated/CryptoGetAccountBalance_pb";
 import { ResponseHeader } from "../generated/ResponseHeader_pb";
 
+/**
+ * Get the balance of a cryptocurrency account. This returns only the balance, so it is a smaller
+ * and faster reply than CryptoGetInfo, which returns the balance plus additional information.
+ */
 export class AccountBalanceQuery extends QueryBuilder<Hbar> {
     private readonly _builder: CryptoGetAccountBalanceQuery;
 
@@ -21,8 +25,11 @@ export class AccountBalanceQuery extends QueryBuilder<Hbar> {
         this._inner.setCryptogetaccountbalance(this._builder);
     }
 
-    public setAccountId(accountId: AccountIdLike): this {
-        this._builder.setAccountid(new AccountId(accountId)._toProto());
+    /**
+     * The account ID for which information is requested.
+     */
+    public setAccountId(id: AccountIdLike): this {
+        this._builder.setAccountid(new AccountId(id)._toProto());
         return this;
     }
 
@@ -49,5 +56,8 @@ export class AccountBalanceQuery extends QueryBuilder<Hbar> {
 
         return Hbar.fromTinybar(accountBalance.getBalance());
     }
-}
 
+    protected _isPaymentRequired(): boolean {
+        return false;
+    }
+}

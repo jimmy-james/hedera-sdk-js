@@ -1,4 +1,5 @@
 import { grpc } from "@improbable-eng/grpc-web";
+import * as nacl from "tweetnacl";
 
 import { ProtobufMessage } from "@improbable-eng/grpc-web/dist/typings/message";
 
@@ -7,18 +8,18 @@ import UnaryMethodDefinition = grpc.UnaryMethodDefinition;
 import { Ed25519PrivateKey } from "./crypto/Ed25519PrivateKey";
 import { Ed25519PublicKey } from "./crypto/Ed25519PublicKey";
 import { AccountId, AccountIdLike } from "./account/AccountId";
-import { Tinybar, tinybarRangeCheck } from "./Tinybar";
 import { AccountBalanceQuery } from "./account/AccountBalanceQuery";
 
-export type Signer = (msg: Uint8Array) => Uint8Array | Promise<Uint8Array>;
+export type TransactionSigner = (msg: Uint8Array) => Uint8Array | Promise<Uint8Array>;
 
 /** If `privateKey` is a string it will be parsed as an `Ed25519PrivateKey` */
 export interface PrivateKey {
     privateKey: Ed25519PrivateKey | string;
 }
+
 export interface PubKeyAndSigner {
     publicKey: Ed25519PublicKey;
-    signer: Signer;
+    signer: TransactionSigner;
 }
 
 export type SigningOpts = PrivateKey | PubKeyAndSigner;
@@ -37,21 +38,78 @@ export interface Node {
 
 export interface ClientConfig {
     network?: Nodes;
-    operator: Operator;
+    operator?: Operator;
 }
 
 export abstract class BaseClient {
-    private _operator?: Operator;
-    private _operatorSigner?: Signer;
+    private _operatorAccount?: AccountId;
+    private _operatorSigner?: TransactionSigner;
     private _operatorPublicKey?: Ed25519PublicKey;
 
-    protected readonly _nodes: Node[];
+    protected _nodes: Node[] = [];
 
     // Default payment and transaction fees to 1 hbar
-    private _maxTransactionFee: Hbar = Hbar.of(1);
-    private _maxQueryPayment?: Hbar = Hbar.of(1);
+
+    // NOTE: This is a package-private API
+    public _maxTransactionFee: Hbar = new Hbar(1);
+
+    // NOTE: This is a package-private API
+    public _maxQueryPayment: Hbar = new Hbar(1);
 
     protected constructor(network: Nodes, operator?: Operator) {
+        this.replaceNodes(network);
+
+        if (operator) {
+            if ((operator as PrivateKey).privateKey != null) {
+                this.setOperator(
+                    operator.account,
+                    (operator as PrivateKey).privateKey
+                );
+            } else {
+                this.setOperatorWith(
+                    operator.account,
+                    (operator as PubKeyAndSigner).publicKey as Ed25519PublicKey,
+                    (operator as PubKeyAndSigner).signer as TransactionSigner
+                );
+            }
+        }
+    }
+
+    // Add a node to the list of nodes
+    // @deprecate `BaseClient.putNode()` is deprecrated. Use `BaseClient.replaceNodes()` instead.
+    public putNode(id: AccountIdLike, url: string): this {
+        console.warn("`BaseClient.putNode()` is deprecrated. Use `BaseClient.replaceNodes()` instead.");
+        this._nodes.push({ id: new AccountId(id), url });
+        return this;
+    }
+
+    /** Set the operator for the client object */
+    public setOperator(account: AccountIdLike, privateKey: Ed25519PrivateKey | string): this {
+        const key = typeof privateKey === "string" ?
+            Ed25519PrivateKey.fromString(privateKey as string) :
+                        privateKey as Ed25519PrivateKey;
+
+        this._operatorAccount = new AccountId(account);
+        this._operatorPublicKey = key.publicKey;
+        this._operatorSigner =
+            (msg: Uint8Array): Uint8Array => nacl.sign(msg, key._keyData);
+
+        return this;
+    }
+
+    public setOperatorWith(
+        account: AccountIdLike,
+        publicKey: Ed25519PublicKey,
+        signer: TransactionSigner
+    ): this {
+        this._operatorAccount = new AccountId(account);
+        this._operatorPublicKey = publicKey;
+        this._operatorSigner = signer;
+
+        return this;
+    }
+
+    public replaceNodes(network: Nodes): this {
         this._nodes = Array.isArray(network) ?
             network as Node[] :
             Object.entries(network)
@@ -60,41 +118,14 @@ export abstract class BaseClient {
                     return { url, id };
                 });
 
-        if (operator) {
-            this.setOperator(operator);
-        }
-    }
-
-    /** Add a node to the list of nodes */
-    public putNode(id: AccountIdLike, url: string): this {
-        this._nodes.push({ id: new AccountId(id), url });
         return this;
     }
 
-    /** Set the operator for the client object */
-    public setOperator(operator: Operator): this {
-        this._operator = operator;
-
-        const maybePrivateKey = (operator as PrivateKey).privateKey;
-        if (maybePrivateKey) {
-            const privateKey = maybePrivateKey instanceof Ed25519PrivateKey ?
-                maybePrivateKey :
-                Ed25519PrivateKey.fromString(maybePrivateKey);
-            this._operatorSigner = (msg): Uint8Array => privateKey.sign(msg);
-            this._operatorPublicKey = privateKey.publicKey;
-        } else {
-            ({ publicKey: this._operatorPublicKey, signer: this._operatorSigner } =
-                operator as PubKeyAndSigner);
-        }
-
-        return this;
+    public _getOperatorAccountId(): AccountId | undefined {
+        return this._operatorAccount;
     }
 
-    public _getOperator(): Operator | undefined {
-        return this._operator;
-    }
-
-    public _getOperatorSigner(): Signer | undefined {
+    public _getOperatorSigner(): TransactionSigner | undefined {
         return this._operatorSigner;
     }
 
@@ -104,11 +135,15 @@ export abstract class BaseClient {
 
     /** Get the current maximum transaction fee. */
     public get maxTransactionFee(): Hbar {
+        console.warn("deprecated: Client#maxTransactionFee is deprecated for removal with no replacement; please see #184");
+
         return this._maxTransactionFee;
     }
 
     /** Get the current maximum query payment. */
     public get maxQueryPayment(): Hbar | undefined {
+        console.warn("deprecated: Client#maxQueryPayment is deprecated for removal with no replacement; please see #184");
+
         return this._maxQueryPayment;
     }
 
@@ -118,15 +153,13 @@ export abstract class BaseClient {
      * This can be overridden for an individual transaction with
      * `TransactionBuilder.setMaxTransactionFee()`.
      *
-     * If a transaction's fee will exceed this value, a `HederaError` will be thrown with
+     * If a transaction's fee will exceed this value, a `HederaStatusError` will be thrown with
      * `ResponseCode.INSUFFICIENT_TX_FEE`.
      *
      * @param maxFee
-     * @throws TinybarValueError if the value is out of range for the protocol
      */
-    public setMaxTransactionFee(maxFee: Tinybar | Hbar): this {
-        tinybarRangeCheck(maxFee);
-        this._maxTransactionFee = maxFee instanceof Hbar ? maxFee : Hbar.fromTinybar(maxFee);
+    public setMaxTransactionFee(maxFee: Hbar): this {
+        this._maxTransactionFee = maxFee;
         return this;
     }
 
@@ -135,18 +168,15 @@ export abstract class BaseClient {
      *
      * If this is not called then by default no payments will be made automatically for queries.
      *
-     * If a query will cost more than this amount, a `MaxPaymentExceededError` will be thrown
+     * If a query will cost more than this amount, a `MaxQueryPaymentExceededError` will be thrown
      * from `QueryBuilder.execute()`.
      *
      * This can be overridden for an individual query with
      * `query.setPaymentDefault(await query.requestCost())`.
      *
      * @param maxPayment the maximum automatic payment for a query
-     * @throws TinybarValueError if the value is out of range for the protocol
      */
-    public setMaxQueryPayment(maxPayment: Tinybar | Hbar): this {
-        tinybarRangeCheck(maxPayment);
-
+    public setMaxQueryPayment(maxPayment: Hbar): this {
         this._maxQueryPayment = maxPayment instanceof Hbar ?
             maxPayment :
             Hbar.fromTinybar(maxPayment);

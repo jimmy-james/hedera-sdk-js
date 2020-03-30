@@ -14,13 +14,14 @@ export enum ArgumentType {
     int32 = 5,
     uint64 = 6,
     int64 = 7,
-    int256 = 8,
-    string = 9,
-    bool = 10,
-    bytes = 11,
-    bytesfix = 12,
-    address = 13,
-    func = 14,
+    uint256 = 8,
+    int256 = 9,
+    string = 10,
+    bool = 11,
+    bytes = 12,
+    bytes32 = 13,
+    address = 14,
+    func = 15,
 }
 
 export interface SolidityType {
@@ -53,8 +54,20 @@ export class ContractFunctionSelector {
         return this._addParam({ ty: ArgumentType.bytes, array: false });
     }
 
+    public addBytes32(): this {
+        return this._addParam({ ty: ArgumentType.bytes32, array: false });
+    }
+
     public addBytesArray(): this {
         return this._addParam({ ty: ArgumentType.bytes, array: true });
+    }
+
+    public addBytes32Array(): this {
+        return this._addParam({ ty: ArgumentType.bytes32, array: true });
+    }
+
+    public addInt8(): this {
+        return this._addParam({ ty: ArgumentType.int8, array: false });
     }
 
     public addInt32(): this {
@@ -69,6 +82,10 @@ export class ContractFunctionSelector {
         return this._addParam({ ty: ArgumentType.int256, array: false });
     }
 
+    public addInt8Array(): this {
+        return this._addParam({ ty: ArgumentType.int8, array: true });
+    }
+
     public addInt32Array(): this {
         return this._addParam({ ty: ArgumentType.int32, array: true });
     }
@@ -79,6 +96,38 @@ export class ContractFunctionSelector {
 
     public addInt256Array(): this {
         return this._addParam({ ty: ArgumentType.int256, array: true });
+    }
+
+    public addUint8(): this {
+        return this._addParam({ ty: ArgumentType.uint8, array: false });
+    }
+
+    public addUint32(): this {
+        return this._addParam({ ty: ArgumentType.uint32, array: false });
+    }
+
+    public addUint64(): this {
+        return this._addParam({ ty: ArgumentType.uint64, array: false });
+    }
+
+    public addUint256(): this {
+        return this._addParam({ ty: ArgumentType.uint256, array: false });
+    }
+
+    public addUint8Array(): this {
+        return this._addParam({ ty: ArgumentType.uint8, array: true });
+    }
+
+    public addUint32Array(): this {
+        return this._addParam({ ty: ArgumentType.uint32, array: true });
+    }
+
+    public addUint64Array(): this {
+        return this._addParam({ ty: ArgumentType.uint64, array: true });
+    }
+
+    public addUint256Array(): this {
+        return this._addParam({ ty: ArgumentType.uint256, array: true });
     }
 
     public addBool(): this {
@@ -126,7 +175,7 @@ export class ContractFunctionSelector {
     }
 }
 
-function solidityTypeToString(ty: SolidityType, length?: number): string {
+function solidityTypeToString(ty: SolidityType): string {
     let s = "";
     switch (ty.ty) {
         case ArgumentType.uint8:
@@ -153,6 +202,9 @@ function solidityTypeToString(ty: SolidityType, length?: number): string {
         case ArgumentType.int64:
             s = "int64";
             break;
+        case ArgumentType.uint256:
+            s = "uint256";
+            break;
         case ArgumentType.int256:
             s = "int256";
             break;
@@ -165,8 +217,8 @@ function solidityTypeToString(ty: SolidityType, length?: number): string {
         case ArgumentType.bytes:
             s = "bytes";
             break;
-        case ArgumentType.bytesfix:
-            s = `bytes${length}`;
+        case ArgumentType.bytes32:
+            s = "bytes32";
             break;
         case ArgumentType.address:
             s = "address";

@@ -5,11 +5,10 @@ import { TransactionId, TransactionIdLike } from "./TransactionId";
 import { grpc } from "@improbable-eng/grpc-web";
 import { Query } from "./generated/Query_pb";
 import { Response } from "./generated/Response_pb";
-import { receiptToSdk, TransactionReceipt } from "./TransactionReceipt";
+import { TransactionReceipt } from "./TransactionReceipt";
 import { CryptoService } from "./generated/CryptoService_pb_service";
 import { ResponseHeader } from "./generated/ResponseHeader_pb";
-import { ResponseCode } from "./errors";
-import { ResponseCodeEnum } from "./generated/ResponseCode_pb";
+import { Status } from "./Status";
 
 export class TransactionReceiptQuery extends QueryBuilder<TransactionReceipt> {
     private readonly _builder: ProtoTransactionGetReceiptQuery;
@@ -39,21 +38,32 @@ export class TransactionReceiptQuery extends QueryBuilder<TransactionReceipt> {
         return CryptoService.getTransactionReceipts;
     }
 
-    protected _shouldRetry(status: ResponseCode, response: Response): boolean {
+    protected _shouldRetry(status: Status, response: Response): boolean {
         if (super._shouldRetry(status, response)) return true;
 
-        if (status === ResponseCodeEnum.OK) {
-            const receipt = response.getTransactiongetreceipt()!.getReceipt()!;
-            const receiptStatus = receipt.getStatus()! as number;
+        if (([
+            Status.Busy.code,
+            Status.Unknown.code,
+            Status.ReceiptNotFound.code
+        ] as number[]).includes(status.code)) {
+            return true;
+        }
 
+        // If there _was_ a receipt fetched, check the status of that
+
+        const receipt = response.getTransactiongetreceipt()?.getReceipt();
+        const receiptStatus = receipt == null ? null : Status._fromCode(receipt.getStatus());
+
+        if (receiptStatus != null) {
             if (([
                 // Accepted but has not reached consensus
-                ResponseCodeEnum.OK,
+                Status.Ok.code,
                 // Queue is full
-                ResponseCodeEnum.BUSY,
+                Status.Busy.code,
                 // Still in the node's queue
-                ResponseCodeEnum.UNKNOWN
-            ] as number[]).includes(receiptStatus)) {
+                Status.Unknown.code,
+                Status.ReceiptNotFound.code
+            ] as number[]).includes(receiptStatus.code)) {
                 return true;
             }
         }
@@ -81,6 +91,6 @@ export class TransactionReceiptQuery extends QueryBuilder<TransactionReceipt> {
     protected _mapResponse(response: Response): TransactionReceipt {
         const receipt = response.getTransactiongetreceipt()!;
 
-        return receiptToSdk(receipt.getReceipt()!);
+        return TransactionReceipt._fromProto(receipt.getReceipt()!);
     }
 }
